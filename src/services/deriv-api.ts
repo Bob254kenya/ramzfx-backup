@@ -1,6 +1,6 @@
 const DERIV_APP_ID = 131592;
 const DERIV_WS_URL = `wss://ws.derivws.com/websockets/v3?app_id=${DERIV_APP_ID}`;
-const DERIV_OAUTH_URL = `https://oauth.deriv.com/oauth2/authorize?app_id=${DERIV_APP_ID}`;
+const DERIV_OAUTH_URL = `https://oauth.deriv.com/oauth2/authorize?app_id=${DERIV_APP_ID}&brand=deriv`;
 
 export interface DerivAccount {
   loginid: string;
@@ -61,7 +61,10 @@ class DerivAPI {
   private globalHandlers: MessageHandler[] = [];
   private connected = false;
   private connectPromise: Promise<void> | null = null;
-  private activeCurrency: string = 'USD'; // Track active account currency
+  private activeCurrency: string = 'USD';
+  private reconnectAttempts = 0;
+  private maxReconnectAttempts = 5;
+  private reconnectDelay = 1000;
 
   get isConnected() { return this.connected; }
 
@@ -69,44 +72,89 @@ class DerivAPI {
     this.activeCurrency = currency;
   }
 
+  private async reconnect(): Promise<void> {
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      console.error('Max reconnection attempts reached');
+      return;
+    }
+
+    this.reconnectAttempts++;
+    const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1);
+    
+    console.log(`Attempting to reconnect in ${delay}ms...`);
+    
+    await new Promise(resolve => setTimeout(resolve, delay));
+    
+    if (!this.connected) {
+      await this.connect();
+    }
+  }
+
   connect(): Promise<void> {
     if (this.connectPromise) return this.connectPromise;
     
     this.connectPromise = new Promise((resolve, reject) => {
-      this.ws = new WebSocket(DERIV_WS_URL);
-      
-      this.ws.onopen = () => {
-        this.connected = true;
-        resolve();
-      };
-
-      this.ws.onmessage = (event) => {
-        const data = JSON.parse(event.data);
+      try {
+        this.ws = new WebSocket(DERIV_WS_URL);
         
-        if (data.req_id && this.handlers.has(data.req_id)) {
-          this.handlers.get(data.req_id)!(data);
-          this.handlers.delete(data.req_id);
-        }
+        this.ws.onopen = () => {
+          console.log('WebSocket connected successfully');
+          this.connected = true;
+          this.reconnectAttempts = 0;
+          resolve();
+        };
 
-        if (data.tick) {
-          const symbol = data.tick.symbol;
-          const handlers = this.subscriptionHandlers.get(symbol) || [];
-          handlers.forEach(h => h(data));
-        }
+        this.ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            
+            // Handle timeout responses properly
+            if (data.error?.code === 'RequestTimeout') {
+              console.warn('Request timeout received:', data.error);
+              if (data.req_id && this.handlers.has(data.req_id)) {
+                this.handlers.get(data.req_id)!({ error: data.error });
+                this.handlers.delete(data.req_id);
+              }
+              return;
+            }
+            
+            if (data.req_id && this.handlers.has(data.req_id)) {
+              this.handlers.get(data.req_id)!(data);
+              this.handlers.delete(data.req_id);
+            }
 
-        this.globalHandlers.forEach(h => h(data));
-      };
+            if (data.tick) {
+              const symbol = data.tick.symbol;
+              const handlers = this.subscriptionHandlers.get(symbol) || [];
+              handlers.forEach(h => h(data));
+            }
 
-      this.ws.onclose = () => {
-        this.connected = false;
-        this.connectPromise = null;
-      };
+            this.globalHandlers.forEach(h => h(data));
+          } catch (err) {
+            console.error('Error parsing WebSocket message:', err);
+          }
+        };
 
-      this.ws.onerror = (err) => {
-        this.connected = false;
-        this.connectPromise = null;
+        this.ws.onclose = (event) => {
+          console.log(`WebSocket disconnected: ${event.code} - ${event.reason}`);
+          this.connected = false;
+          this.connectPromise = null;
+          
+          // Attempt reconnect if not a normal closure
+          if (event.code !== 1000) {
+            this.reconnect().catch(console.error);
+          }
+        };
+
+        this.ws.onerror = (err) => {
+          console.error('WebSocket error:', err);
+          this.connected = false;
+          this.connectPromise = null;
+          reject(err);
+        };
+      } catch (err) {
         reject(err);
-      };
+      }
     });
 
     return this.connectPromise;
@@ -114,7 +162,7 @@ class DerivAPI {
 
   disconnect() {
     if (this.ws) {
-      this.ws.close();
+      this.ws.close(1000, 'Normal closure');
       this.ws = null;
       this.connected = false;
       this.connectPromise = null;
@@ -129,35 +177,58 @@ class DerivAPI {
         reject(new Error('WebSocket not connected'));
         return;
       }
+      
       const reqId = ++this.reqId;
       data.req_id = reqId;
-      this.handlers.set(reqId, resolve);
-      this.ws.send(JSON.stringify(data));
       
-      setTimeout(() => {
+      const timeoutId = setTimeout(() => {
         if (this.handlers.has(reqId)) {
           this.handlers.delete(reqId);
-          reject(new Error('Request timeout'));
+          reject(new Error(`Request timeout for ${JSON.stringify(data)}`));
         }
       }, 30000);
+      
+      this.handlers.set(reqId, (response) => {
+        clearTimeout(timeoutId);
+        resolve(response);
+      });
+      
+      try {
+        this.ws!.send(JSON.stringify(data));
+      } catch (err) {
+        clearTimeout(timeoutId);
+        this.handlers.delete(reqId);
+        reject(err);
+      }
     });
   }
 
   async authorize(token: string): Promise<AuthorizeResponse> {
     await this.connect();
     const response = await this.send({ authorize: token });
-    if (response.error) throw new Error(response.error.message);
-    // Update active currency from authorized account
-    if (response.authorize && response.authorize.currency) {
-      this.setActiveCurrency(response.authorize.currency);
+    
+    if (response.error) {
+      throw new Error(response.error.message || response.error.code || 'Authorization failed');
     }
-    return response;
+    
+    if (response.authorize) {
+      if (response.authorize.currency) {
+        this.setActiveCurrency(response.authorize.currency);
+      }
+      return response;
+    }
+    
+    throw new Error('Invalid authorize response');
   }
 
   async getBalance(): Promise<any> {
-    const response = await this.send({ balance: 1, subscribe: 1 });
+    const response = await this.send({ balance: 1 });
     if (response.error) throw new Error(response.error.message);
     return response;
+  }
+
+  async subscribeBalance(handler: MessageHandler) {
+    return this.onMessage(handler);
   }
 
   async subscribeTicks(symbol: string, handler: MessageHandler) {
@@ -188,10 +259,6 @@ class DerivAPI {
     return response;
   }
 
-  /**
-   * Buy a contract and return the contract_id immediately.
-   * Does NOT wait for the contract to settle.
-   */
   async buyContract(params: {
     contract_type: string;
     symbol: string;
@@ -202,7 +269,6 @@ class DerivAPI {
     barrier?: string;
     currency?: string;
   }): Promise<{ contractId: string; buyPrice: number }> {
-    // Step 1: Get proposal
     const proposalReq: any = {
       proposal: 1,
       contract_type: params.contract_type,
@@ -213,6 +279,7 @@ class DerivAPI {
       amount: params.amount,
       currency: params.currency || this.activeCurrency || 'USD',
     };
+    
     if (params.barrier !== undefined) {
       proposalReq.barrier = params.barrier;
     }
@@ -220,7 +287,6 @@ class DerivAPI {
     const proposal = await this.send(proposalReq);
     if (proposal.error) throw new Error(proposal.error.message);
 
-    // Step 2: Buy
     const buyResponse = await this.send({
       buy: proposal.proposal.id,
       price: params.amount,
@@ -233,18 +299,22 @@ class DerivAPI {
     };
   }
 
-  /**
-   * CRITICAL: Wait for a contract to fully settle (expire).
-   * Subscribes to proposal_open_contract and resolves only when
-   * is_expired === 1 or is_sold === 1.
-   * Returns the REAL profit from Deriv API — no local guessing.
-   */
   waitForContractResult(contractId: string): Promise<ContractResult> {
     return new Promise((resolve, reject) => {
       let subscriptionId: string | null = null;
+      
       const timeout = setTimeout(() => {
+        cleanup();
         reject(new Error('Contract result timeout (60s)'));
       }, 60000);
+
+      const cleanup = () => {
+        clearTimeout(timeout);
+        if (subscriptionId) {
+          this.send({ forget: subscriptionId }).catch(() => {});
+        }
+        this.globalHandlers = this.globalHandlers.filter(h => h !== checkResult);
+      };
 
       const checkResult = (data: any) => {
         const poc = data.proposal_open_contract;
@@ -254,17 +324,9 @@ class DerivAPI {
         const isSettled = poc.is_expired === 1 || poc.is_sold === 1 || poc.status === 'sold';
 
         if (isSettled) {
-          clearTimeout(timeout);
+          cleanup();
 
-          // Forget this subscription
-          if (subscriptionId) {
-            this.send({ forget: subscriptionId }).catch(() => {});
-          }
-
-          // Remove global handler
-          this.globalHandlers = this.globalHandlers.filter(h => h !== checkResult);
-
-          const profit = poc.profit || (poc.sell_price - poc.buy_price) || 0;
+          const profit = typeof poc.profit === 'number' ? poc.profit : (poc.sell_price - poc.buy_price) || 0;
           const won = profit > 0;
 
           resolve({
@@ -278,35 +340,29 @@ class DerivAPI {
         }
       };
 
-      // Register global handler to catch subscription messages
       this.globalHandlers.push(checkResult);
 
-      // Subscribe to the contract
       this.send({
         proposal_open_contract: 1,
         contract_id: contractId,
         subscribe: 1,
       }).then(data => {
         if (data.error) {
-          clearTimeout(timeout);
-          this.globalHandlers = this.globalHandlers.filter(h => h !== checkResult);
+          cleanup();
           reject(new Error(data.error.message));
           return;
         }
         if (data.subscription) {
           subscriptionId = data.subscription.id;
         }
-        // Check if already settled in the initial response
         checkResult(data);
       }).catch(err => {
-        clearTimeout(timeout);
-        this.globalHandlers = this.globalHandlers.filter(h => h !== checkResult);
+        cleanup();
         reject(err);
       });
     });
   }
 
-  /** Legacy buy — kept for backward compat but prefer buyContract + waitForContractResult */
   async buy(params: {
     contract_type: string;
     symbol: string;
@@ -329,7 +385,7 @@ class DerivAPI {
     };
   }
 
-  onMessage(handler: MessageHandler) {
+  onMessage(handler: MessageHandler): () => void {
     this.globalHandlers.push(handler);
     return () => {
       this.globalHandlers = this.globalHandlers.filter(h => h !== handler);
@@ -340,21 +396,44 @@ class DerivAPI {
 export const derivApi = new DerivAPI();
 
 export function getOAuthUrl(): string {
-  return DERIV_OAUTH_URL;
+  // Generate a random state parameter for security
+  const state = Math.random().toString(36).substring(2) + Date.now().toString(36);
+  // Store state in sessionStorage to verify on redirect
+  sessionStorage.setItem('oauth_state', state);
+  return `${DERIV_OAUTH_URL}&state=${state}`;
 }
 
 export function parseOAuthRedirect(search: string): DerivAccount[] {
   const params = new URLSearchParams(search);
   const accounts: DerivAccount[] = [];
   
+  // Verify state parameter if present
+  const state = params.get('state');
+  const storedState = sessionStorage.getItem('oauth_state');
+  
+  if (state && storedState && state !== storedState) {
+    console.error('OAuth state mismatch - possible CSRF attack');
+    return [];
+  }
+  
+  // Clear stored state after verification
+  sessionStorage.removeItem('oauth_state');
+  
   let i = 1;
   while (params.has(`acct${i}`)) {
-    accounts.push({
-      loginid: params.get(`acct${i}`)!,
-      token: params.get(`token${i}`)!,
-      currency: params.get(`cur${i}`) || 'USD',
-      is_virtual: params.get(`acct${i}`)!.startsWith('VRTC'),
-    });
+    const loginid = params.get(`acct${i}`)!;
+    const token = params.get(`token${i}`)!;
+    const currency = params.get(`cur${i}`) || 'USD';
+    
+    // Skip invalid entries
+    if (loginid && token) {
+      accounts.push({
+        loginid,
+        token,
+        currency,
+        is_virtual: loginid.startsWith('VRTC'),
+      });
+    }
     i++;
   }
   
