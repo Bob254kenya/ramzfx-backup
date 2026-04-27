@@ -10,15 +10,11 @@ import InstallButton from '@/components/InstallButton';
 // SOCIAL NOTIFICATION POPUP - COMBINED CODE
 // ============================================
 
-// Animation Styles (add to your global CSS or component)
+// Animation Styles
 const socialNotificationStyles = `
 @keyframes fadeIn {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 @keyframes slideUpCenter {
@@ -44,45 +40,25 @@ const socialNotificationStyles = `
 }
 
 @keyframes gradientShift {
-  0% {
-    background-position: 0% 50%;
-  }
-  50% {
-    background-position: 100% 50%;
-  }
-  100% {
-    background-position: 0% 50%;
-  }
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
 }
 
 @keyframes float {
-  0% {
-    transform: translateY(0px) rotate(0deg);
-  }
-  50% {
-    transform: translateY(-10px) rotate(5deg);
-  }
-  100% {
-    transform: translateY(0px) rotate(0deg);
-  }
+  0% { transform: translateY(0px) rotate(0deg); }
+  50% { transform: translateY(-10px) rotate(5deg); }
+  100% { transform: translateY(0px) rotate(0deg); }
 }
 
 @keyframes bounce {
-  0%, 100% {
-    transform: translateY(0);
-  }
-  50% {
-    transform: translateY(-5px);
-  }
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-5px); }
 }
 
 @keyframes pulse {
-  0%, 100% {
-    transform: scale(1);
-  }
-  50% {
-    transform: scale(1.05);
-  }
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.05); }
 }
 
 .animate-fadeIn {
@@ -198,10 +174,10 @@ const SocialNotificationPopup = () => {
   return (
     <>
       <style>{socialNotificationStyles}</style>
-      <div className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none">
+      <div className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none p-4">
         <div 
           className={`
-            pointer-events-auto w-[500px] h-[400px] rounded-2xl shadow-2xl overflow-hidden
+            pointer-events-auto w-full max-w-[500px] rounded-2xl shadow-2xl overflow-hidden
             ${isExiting ? 'animate-slide-down-center' : 'animate-slide-up-center'}
           `}
         >
@@ -305,12 +281,15 @@ const SocialNotificationPopup = () => {
 // ============================================
 
 export default function LoginPage() {
-  const { login, isLoading } = useAuth();
+  const { login, isLoading, authError } = useAuth();
 
   const affiliateUrl = 'https://partners.deriv.com/rx?sidc=12B9BBE9-886B-4B0A-A906-B5FC911F276A&utm_campaign=dynamicworks&utm_medium=affiliate&utm_source=CU15839';
 
   return (
     <>
+      {/* Add styles to head */}
+      <style>{socialNotificationStyles}</style>
+      
       {/* Social Notification Popup */}
       <SocialNotificationPopup />
       
@@ -320,8 +299,8 @@ export default function LoginPage() {
       <div className="min-h-screen flex items-center justify-center p-4 relative overflow-hidden">
         {/* Background image */}
         <div className="absolute inset-0 z-0">
-          <img src={bgHero} alt="" className="w-full h-full object-cover" />
-          <div className="absolute inset-0 bg-background/40" />
+          <img src={bgHero} alt="Background" className="w-full h-full object-cover" />
+          <div className="absolute inset-0 bg-background/60 backdrop-blur-[2px]" />
         </div>
 
         <motion.div
@@ -338,8 +317,8 @@ export default function LoginPage() {
               transition={{ duration: 0.6, delay: 0.2, type: 'spring', stiffness: 200 }}
               className="inline-flex items-center gap-3 mb-4"
             >
-              <div className="w-14 h-14 rounded-2xl gradient-primary flex items-center justify-center glow-primary shadow-lg">
-                <Activity className="w-7 h-7 text-primary-foreground" />
+              <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-primary to-primary/70 flex items-center justify-center shadow-lg">
+                <Activity className="w-7 h-7 text-white" />
               </div>
               <div className="text-left">
                 <h1 className="text-3xl font-bold text-foreground leading-tight">
@@ -363,8 +342,19 @@ export default function LoginPage() {
             initial={{ opacity: 0, y: 15, scale: 0.98 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             transition={{ duration: 0.5, delay: 0.3 }}
-            className="bg-card border border-border rounded-2xl p-8 glow-primary backdrop-blur-sm"
+            className="bg-card/95 backdrop-blur-md border border-border rounded-2xl p-8 shadow-2xl"
           >
+            {/* Error Display */}
+            {authError && (
+              <motion.div
+                initial={{ opacity: 0, y: -10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="mb-4 p-3 rounded-lg bg-destructive/10 border border-destructive/30 text-destructive text-sm text-center"
+              >
+                {authError}
+              </motion.div>
+            )}
+
             {/* Features */}
             <div className="grid grid-cols-2 gap-3 mb-8">
               {[
@@ -378,7 +368,7 @@ export default function LoginPage() {
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ delay: 0.5 + i * 0.1 }}
-                  className="flex items-center gap-3 text-sm bg-muted/30 rounded-xl p-3 border border-border/50 hover:border-primary/30 transition-colors"
+                  className="flex items-center gap-3 text-sm bg-muted/50 rounded-xl p-3 border border-border/50 hover:border-primary/30 transition-colors"
                 >
                   <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
                     <feature.icon className="w-4 h-4 text-primary" />
@@ -400,12 +390,12 @@ export default function LoginPage() {
               <Button
                 onClick={login}
                 disabled={isLoading}
-                className="w-full h-12 text-base font-semibold gradient-primary text-primary-foreground hover:opacity-90 transition-all glow-primary rounded-xl"
+                className="w-full h-12 text-base font-semibold bg-gradient-to-r from-primary to-primary/80 hover:from-primary/90 hover:to-primary/70 text-white transition-all shadow-lg rounded-xl"
                 size="lg"
               >
                 {isLoading ? (
                   <span className="flex items-center gap-2">
-                    <span className="w-4 h-4 border-2 border-primary-foreground/30 border-t-primary-foreground rounded-full animate-spin" />
+                    <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                     Connecting...
                   </span>
                 ) : (
@@ -432,8 +422,18 @@ export default function LoginPage() {
               </div>
             </motion.div>
           </motion.div>
+
+          {/* Footer */}
+          <motion.p
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ delay: 1.1 }}
+            className="text-center text-[10px] text-muted-foreground mt-6"
+          >
+            By logging in, you agree to our Terms of Service and Privacy Policy
+          </motion.p>
         </motion.div>
       </div>
     </>
   );
-            }
+}
