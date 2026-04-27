@@ -3,6 +3,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { Activity, Shield, TrendingUp, Zap, Users, MessageCircle, MessageSquare, Youtube, Instagram, Music, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import bgHero from '@/assets/bg-hero.jpeg';
 import InstallButton from '@/components/InstallButton';
 
@@ -281,9 +282,17 @@ const SocialNotificationPopup = () => {
 // ============================================
 
 export default function LoginPage() {
-  const { login, isLoading, authError } = useAuth();
+  const { login, isLoading, authError, isAuthorized } = useAuth();
+  const navigate = useNavigate();
 
   const affiliateUrl = 'https://partners.deriv.com/rx?sidc=12B9BBE9-886B-4B0A-A906-B5FC911F276A&utm_campaign=dynamicworks&utm_medium=affiliate&utm_source=CU15839';
+
+  // Redirect to dashboard if already authorized
+  useEffect(() => {
+    if (isAuthorized) {
+      navigate('/dashboard', { replace: true });
+    }
+  }, [isAuthorized, navigate]);
 
   return (
     <>
@@ -309,13 +318,16 @@ export default function LoginPage() {
           transition={{ duration: 0.7, ease: 'easeOut' }}
           className="w-full max-w-md relative z-10"
         >
-          {/* Logo / Brand */}
+          {/* Logo / Brand with link to ramzfx.site */}
           <div className="text-center mb-10">
-            <motion.div
+            <motion.a
+              href="https://ramzfx.site"
+              target="_blank"
+              rel="noopener noreferrer"
               initial={{ scale: 0.5, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               transition={{ duration: 0.6, delay: 0.2, type: 'spring', stiffness: 200 }}
-              className="inline-flex items-center gap-3 mb-4"
+              className="inline-flex items-center gap-3 mb-4 cursor-pointer hover:opacity-80 transition-opacity"
             >
               <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-primary to-primary/70 flex items-center justify-center shadow-lg">
                 <Activity className="w-7 h-7 text-white" />
@@ -324,9 +336,9 @@ export default function LoginPage() {
                 <h1 className="text-3xl font-bold text-foreground leading-tight">
                   RAMZ<span className="text-primary">FX</span>
                 </h1>
-                <p className="text-xs text-muted-foreground -mt-0.5">RAMZFX.SITE</p>
+                <p className="text-xs text-muted-foreground -mt-0.5">ramzfx.site</p>
               </div>
-            </motion.div>
+            </motion.a>
             <motion.p
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
@@ -423,15 +435,26 @@ export default function LoginPage() {
             </motion.div>
           </motion.div>
 
-          {/* Footer */}
-          <motion.p
+          {/* Footer with ramzfx.site link */}
+          <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             transition={{ delay: 1.1 }}
-            className="text-center text-[10px] text-muted-foreground mt-6"
+            className="text-center mt-6 space-y-2"
           >
-            By logging in, you agree to our Terms of Service and Privacy Policy
-          </motion.p>
+            <p className="text-[10px] text-muted-foreground">
+              By logging in, you agree to our Terms of Service and Privacy Policy
+            </p>
+            <a
+              href="https://ramzfx.site"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 text-[10px] text-primary/70 hover:text-primary transition-colors"
+            >
+              Visit ramzfx.site
+              <TrendingUp className="w-2.5 h-2.5" />
+            </a>
+          </motion.div>
         </motion.div>
       </div>
     </>
