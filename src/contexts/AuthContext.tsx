@@ -56,6 +56,7 @@ const filterAllowedAccounts = (accounts: DerivAccount[]): DerivAccount[] => {
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isAuthorized, setIsAuthorized] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [authError, setAuthError] = useState<string | null>(null);
 
   const [accounts, setAccounts] = useState<DerivAccount[]>([]);
   const [activeAccount, setActiveAccount] = useState<DerivAccount | null>(null);
@@ -69,6 +70,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const unsubscribeRef = useRef<null | (() => void)>(null);
   const authLock = useRef(false);
   const initialized = useRef(false);
+  const isMounted = useRef(true);
 
   const cleanupSubscription = useCallback(() => {
     if (unsubscribeRef.current) {
@@ -105,47 +107,69 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const authorizeAccount = useCallback(
     async (account: DerivAccount) => {
-      if (authLock.current) return;
+      if (authLock.current) {
+        console.log('Auth already in progress, skipping');
+        return;
+      }
+      
       authLock.current = true;
+      setAuthError(null);
 
       try {
+        // Ensure WebSocket is disconnected before new authorization
+        derivApi.disconnect();
         cleanupSubscription();
 
+        console.log('Authorizing account:', account.loginid);
         const response = await derivApi.authorize(account.token);
+
+        if (!isMounted.current) return;
 
         setAccountInfo(response.authorize);
         setBalance(response.authorize.balance);
         setActiveAccount(account);
         setIsAuthorized(true);
+        setAuthError(null);
 
         localStorage.setItem("last_active_loginid", account.loginid);
 
+        // Subscribe to balance updates
         unsubscribeRef.current = derivApi.onMessage((data) => {
-          if (data?.balance) {
+          if (data?.balance && isMounted.current) {
             setBalance(data.balance.balance);
           }
         });
 
         await derivApi.getBalance();
+        
+        console.log('Authorization successful for:', account.loginid);
       } catch (err) {
         console.error("Auth failed:", err);
-        setIsAuthorized(false);
+        if (isMounted.current) {
+          setAuthError(err instanceof Error ? err.message : 'Authorization failed');
+          setIsAuthorized(false);
+          setActiveAccount(null);
+        }
       } finally {
-        authLock.current = false;
+        if (isMounted.current) {
+          authLock.current = false;
+        }
       }
     },
     [cleanupSubscription]
   );
 
-  // ✅ INIT AUTH ONLY ONCE (THIS FIXES YOUR PAGE REDIRECT BUG)
+  // ✅ INIT AUTH ONLY ONCE (FIXED REDIRECT BUG)
   useEffect(() => {
     if (initialized.current) return;
     initialized.current = true;
+    isMounted.current = true;
 
     let cancelled = false;
 
     const init = async () => {
       setIsLoading(true);
+      setAuthError(null);
 
       try {
         const search = location.search;
@@ -162,6 +186,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             
             if (allowedAccounts.length === 0) {
               console.warn('No allowed accounts found (CRW and VRW filtered out)');
+              if (isMounted.current) {
+                setAuthError('No valid accounts found. Please use a different account.');
+              }
               setIsLoading(false);
               return;
             }
@@ -171,18 +198,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               JSON.stringify(allowedAccounts)
             );
 
-            setAccounts(allowedAccounts);
+            if (isMounted.current) {
+              setAccounts(allowedAccounts);
+            }
 
             const account = selectAccount(allowedAccounts);
 
             await authorizeAccount(account);
 
-            if (!cancelled) {
+            if (!cancelled && isMounted.current) {
+              // Clear the search params from URL
               navigate("/", { replace: true });
             }
+          } else if (!cancelled && isMounted.current) {
+            setIsLoading(false);
           }
-
-          setIsLoading(false);
           return;
         }
 
@@ -191,30 +221,43 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         console.log('Stored accounts from localStorage:', stored);
 
         if (stored) {
-          const parsed: DerivAccount[] = JSON.parse(stored);
-          console.log('Parsed stored accounts:', parsed.map(a => a.loginid));
-          
-          // Filter out CRW and VRW accounts
-          const allowedAccounts = filterAllowedAccounts(parsed);
-          
-          if (allowedAccounts.length === 0) {
-            console.warn('No allowed accounts found in stored data');
-            // Clear invalid stored data
+          try {
+            const parsed: DerivAccount[] = JSON.parse(stored);
+            console.log('Parsed stored accounts:', parsed.map(a => a.loginid));
+            
+            // Filter out CRW and VRW accounts
+            const allowedAccounts = filterAllowedAccounts(parsed);
+            
+            if (allowedAccounts.length === 0) {
+              console.warn('No allowed accounts found in stored data');
+              // Clear invalid stored data
+              localStorage.removeItem("deriv_accounts");
+              if (isMounted.current) {
+                setIsLoading(false);
+              }
+              return;
+            }
+
+            if (isMounted.current) {
+              setAccounts(allowedAccounts);
+            }
+
+            const account = selectAccount(allowedAccounts);
+            await authorizeAccount(account);
+          } catch (parseErr) {
+            console.error('Error parsing stored accounts:', parseErr);
             localStorage.removeItem("deriv_accounts");
-            setIsLoading(false);
-            return;
           }
-
-          setAccounts(allowedAccounts);
-
-          const account = selectAccount(allowedAccounts);
-
-          await authorizeAccount(account);
         }
       } catch (err) {
         console.error("Init auth error:", err);
+        if (isMounted.current) {
+          setAuthError(err instanceof Error ? err.message : 'Initialization failed');
+        }
       } finally {
-        if (!cancelled) setIsLoading(false);
+        if (!cancelled && isMounted.current) {
+          setIsLoading(false);
+        }
       }
     };
 
@@ -222,6 +265,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     return () => {
       cancelled = true;
+      isMounted.current = false;
     };
   }, [location.search, selectAccount, authorizeAccount, navigate]);
 
@@ -233,11 +277,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
   }, [cleanupSubscription]);
 
-  const login = () => {
+  const login = useCallback(() => {
+    // Clear any existing session before new login
+    localStorage.removeItem("deriv_accounts");
+    localStorage.removeItem("last_active_loginid");
+    derivApi.disconnect();
     window.location.href = getOAuthUrl();
-  };
+  }, []);
 
-  const logout = () => {
+  const logout = useCallback(() => {
     cleanupSubscription();
     derivApi.disconnect();
 
@@ -249,15 +297,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setActiveAccount(null);
     setAccountInfo(null);
     setBalance(0);
-  };
+    setAuthError(null);
+  }, [cleanupSubscription]);
 
-  const switchAccount = async (loginid: string) => {
+  const switchAccount = useCallback(async (loginid: string) => {
     const account = accounts.find((a) => a.loginid === loginid);
     if (!account) return;
 
-    derivApi.disconnect();
+    // Clear current state before switching
+    setIsAuthorized(false);
+    setActiveAccount(null);
+    
+    // Small delay to ensure cleanup
+    await new Promise(resolve => setTimeout(resolve, 100));
+    
     await authorizeAccount(account);
-  };
+  }, [accounts, authorizeAccount]);
 
   const value = useMemo(
     () => ({
@@ -267,6 +322,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       activeAccount,
       accountInfo,
       balance,
+      authError,
       login,
       logout,
       switchAccount,
@@ -278,6 +334,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       activeAccount,
       accountInfo,
       balance,
+      authError,
+      login,
+      logout,
+      switchAccount,
     ]
   );
 
