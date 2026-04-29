@@ -1,3 +1,4 @@
+// src/contexts/AuthContext.tsx
 import React, {
   createContext,
   useContext,
@@ -10,8 +11,9 @@ import React, {
 
 import {
   derivApi,
-  parseOAuthRedirect,
   getOAuthUrl,
+  handleOAuthRedirect,
+  TokenManager,
   type DerivAccount,
   type AuthorizeResponse,
 } from "@/services/deriv-api";
@@ -21,13 +23,16 @@ import { useNavigate, useLocation } from "react-router-dom";
 interface AuthState {
   isAuthorized: boolean;
   isLoading: boolean;
+  authError: string | null;
   accounts: DerivAccount[];
   activeAccount: DerivAccount | null;
   accountInfo: AuthorizeResponse["authorize"] | null;
   balance: number;
   login: () => void;
+  signup: () => void;
   logout: () => void;
   switchAccount: (loginid: string) => Promise<void>;
+  getAccessToken: () => string | null;
 }
 
 const AuthContext = createContext<AuthState | null>(null);
@@ -71,6 +76,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const authLock = useRef(false);
   const initialized = useRef(false);
   const isMounted = useRef(true);
+  const oauthProcessed = useRef(false);
 
   const cleanupSubscription = useCallback(() => {
     if (unsubscribeRef.current) {
@@ -132,6 +138,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setAuthError(null);
 
         localStorage.setItem("last_active_loginid", account.loginid);
+        localStorage.setItem("deriv_accounts", JSON.stringify(accounts));
 
         // Subscribe to balance updates
         unsubscribeRef.current = derivApi.onMessage((data) => {
@@ -156,10 +163,37 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
       }
     },
-    [cleanupSubscription]
+    [cleanupSubscription, accounts]
   );
 
-  // ✅ INIT AUTH ONLY ONCE (FIXED REDIRECT BUG)
+  // Load accounts from token manager after OAuth
+  const loadAccountsFromToken = useCallback(async () => {
+    const authState = TokenManager.getAuthState();
+    if (authState?.accounts && authState.accounts.length > 0) {
+      const allowedAccounts = filterAllowedAccounts(authState.accounts);
+      
+      if (allowedAccounts.length > 0) {
+        setAccounts(allowedAccounts);
+        
+        // Update tokens in accounts with current access token
+        const currentToken = TokenManager.getAccessToken();
+        if (currentToken) {
+          allowedAccounts.forEach(acc => {
+            acc.token = currentToken;
+          });
+        }
+        
+        localStorage.setItem("deriv_accounts", JSON.stringify(allowedAccounts));
+        
+        const account = selectAccount(allowedAccounts);
+        await authorizeAccount(account);
+        return true;
+      }
+    }
+    return false;
+  }, [selectAccount, authorizeAccount]);
+
+  // INIT AUTH WITH OAUTH 2.0 PKCE
   useEffect(() => {
     if (initialized.current) return;
     initialized.current = true;
@@ -173,87 +207,88 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       try {
         const search = location.search;
+        const code = new URLSearchParams(search).get('code');
 
-        // OAuth redirect login
-        if (search.includes("acct1")) {
-          console.log('OAuth redirect detected');
-          const parsed = parseOAuthRedirect(search);
-          console.log('Parsed accounts from OAuth:', parsed.map(a => a.loginid));
+        // OAUTH 2.0 PKCE REDIRECT (New flow)
+        if (code && !oauthProcessed.current) {
+          oauthProcessed.current = true;
+          console.log('OAuth 2.0 PKCE redirect detected with code');
+          
+          try {
+            const parsedAccounts = await handleOAuthRedirect(search);
+            console.log('Parsed accounts from OAuth 2.0:', parsedAccounts?.map(a => a.loginid));
 
-          if (parsed.length > 0 && !cancelled) {
-            // Filter out CRW and VRW accounts
-            const allowedAccounts = filterAllowedAccounts(parsed);
-            
-            if (allowedAccounts.length === 0) {
-              console.warn('No allowed accounts found (CRW and VRW filtered out)');
-              if (isMounted.current) {
-                setAuthError('No valid accounts found. Please use a different account.');
+            if (parsedAccounts && parsedAccounts.length > 0 && !cancelled) {
+              // Filter out CRW and VRW accounts
+              const allowedAccounts = filterAllowedAccounts(parsedAccounts);
+              
+              if (allowedAccounts.length === 0) {
+                console.warn('No allowed accounts found (CRW and VRW filtered out)');
+                if (isMounted.current) {
+                  setAuthError('No valid accounts found. Please use a different account.');
+                }
+                setIsLoading(false);
+                return;
               }
+              
+              localStorage.setItem("deriv_accounts", JSON.stringify(allowedAccounts));
+
+              if (isMounted.current) {
+                setAccounts(allowedAccounts);
+              }
+
+              const account = selectAccount(allowedAccounts);
+              await authorizeAccount(account);
+
+              if (!cancelled && isMounted.current) {
+                // Clear the search params from URL
+                navigate("/", { replace: true });
+              }
+            } else if (!cancelled && isMounted.current) {
               setIsLoading(false);
-              return;
             }
-            
-            localStorage.setItem(
-              "deriv_accounts",
-              JSON.stringify(allowedAccounts)
-            );
-
+          } catch (oauthError: any) {
+            console.error('OAuth 2.0 error:', oauthError);
             if (isMounted.current) {
-              setAccounts(allowedAccounts);
+              setAuthError(oauthError.message || 'OAuth authentication failed');
             }
-
-            const account = selectAccount(allowedAccounts);
-
-            await authorizeAccount(account);
-
-            if (!cancelled && isMounted.current) {
-              // Clear the search params from URL
-              navigate("/", { replace: true });
-            }
-          } else if (!cancelled && isMounted.current) {
             setIsLoading(false);
+            // Clear URL params on error
+            navigate("/", { replace: true });
           }
           return;
         }
 
-        // Stored session login
-        const stored = localStorage.getItem("deriv_accounts");
-        console.log('Stored accounts from localStorage:', stored);
+        // LEGACY OAUTH REDIRECT (Backward compatibility - acct1 param)
+        if (search.includes("acct1")) {
+          console.log('Legacy OAuth redirect detected - please use new OAuth flow');
+          setAuthError('Please use the updated login method');
+          setIsLoading(false);
+          return;
+        }
 
-        if (stored) {
-          try {
-            const parsed: DerivAccount[] = JSON.parse(stored);
-            console.log('Parsed stored accounts:', parsed.map(a => a.loginid));
-            
-            // Filter out CRW and VRW accounts
-            const allowedAccounts = filterAllowedAccounts(parsed);
-            
-            if (allowedAccounts.length === 0) {
-              console.warn('No allowed accounts found in stored data');
-              // Clear invalid stored data
-              localStorage.removeItem("deriv_accounts");
-              if (isMounted.current) {
-                setIsLoading(false);
-              }
-              return;
-            }
+        // Stored session login (OAuth 2.0 token)
+        const hasValidToken = TokenManager.isAuthenticated();
+        console.log('Stored token exists:', hasValidToken);
 
-            if (isMounted.current) {
-              setAccounts(allowedAccounts);
-            }
-
-            const account = selectAccount(allowedAccounts);
-            await authorizeAccount(account);
-          } catch (parseErr) {
-            console.error('Error parsing stored accounts:', parseErr);
-            localStorage.removeItem("deriv_accounts");
+        if (hasValidToken) {
+          const loaded = await loadAccountsFromToken();
+          if (!loaded && isMounted.current) {
+            // No accounts found but token exists - might need re-auth
+            console.log('No accounts found with stored token');
+            setIsLoading(false);
           }
+        } else {
+          // No stored session
+          console.log('No stored session found');
+          setIsLoading(false);
         }
       } catch (err) {
         console.error("Init auth error:", err);
         if (isMounted.current) {
           setAuthError(err instanceof Error ? err.message : 'Initialization failed');
         }
+        setIsLoading(false);
       } finally {
         if (!cancelled && isMounted.current) {
           setIsLoading(false);
@@ -267,7 +302,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       cancelled = true;
       isMounted.current = false;
     };
-  }, [location.search, selectAccount, authorizeAccount, navigate]);
+  }, [location.search, selectAccount, authorizeAccount, navigate, loadAccountsFromToken]);
+
+  // Check for token expiration periodically
+  useEffect(() => {
+    const checkTokenExpiry = () => {
+      const authState = TokenManager.getAuthState();
+      if (authState && authState.expires_at) {
+        const timeToExpiry = authState.expires_at - Date.now();
+        if (timeToExpiry <= 0) {
+          console.log('Token expired, logging out');
+          logout();
+        } else if (timeToExpiry < 5 * 60 * 1000 && timeToExpiry > 0) {
+          console.log('Token expiring soon, consider refresh');
+          // Optionally trigger refresh here
+          TokenManager.refreshToken().catch(console.error);
+        }
+      }
+    };
+    
+    const interval = setInterval(checkTokenExpiry, 60000); // Check every minute
+    return () => clearInterval(interval);
+  }, []);
 
   // cleanup websocket on unmount
   useEffect(() => {
@@ -281,16 +337,42 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // Clear any existing session before new login
     localStorage.removeItem("deriv_accounts");
     localStorage.removeItem("last_active_loginid");
+    TokenManager.clearAuthState();
     derivApi.disconnect();
-    window.location.href = getOAuthUrl();
+    
+    // Use OAuth 2.0 with PKCE
+    getOAuthUrl('login').then(url => {
+      window.location.href = url;
+    }).catch(err => {
+      console.error('Failed to generate OAuth URL:', err);
+      setAuthError('Failed to initiate login');
+    });
+  }, []);
+
+  const signup = useCallback(() => {
+    // Clear any existing session before new signup
+    localStorage.removeItem("deriv_accounts");
+    localStorage.removeItem("last_active_loginid");
+    TokenManager.clearAuthState();
+    derivApi.disconnect();
+    
+    // Use OAuth 2.0 with registration prompt
+    getOAuthUrl('registration').then(url => {
+      window.location.href = url;
+    }).catch(err => {
+      console.error('Failed to generate signup URL:', err);
+      setAuthError('Failed to initiate signup');
+    });
   }, []);
 
   const logout = useCallback(() => {
     cleanupSubscription();
     derivApi.disconnect();
+    TokenManager.clearAuthState();
 
     localStorage.removeItem("deriv_accounts");
     localStorage.removeItem("last_active_loginid");
+    localStorage.removeItem("deriv_active_account");
 
     setIsAuthorized(false);
     setAccounts([]);
@@ -298,6 +380,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setAccountInfo(null);
     setBalance(0);
     setAuthError(null);
+    
+    // Reset OAuth processed flag
+    oauthProcessed.current = false;
   }, [cleanupSubscription]);
 
   const switchAccount = useCallback(async (loginid: string) => {
@@ -308,36 +393,50 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setIsAuthorized(false);
     setActiveAccount(null);
     
+    // Update token if needed
+    const currentToken = TokenManager.getAccessToken();
+    if (currentToken) {
+      account.token = currentToken;
+    }
+    
     // Small delay to ensure cleanup
     await new Promise(resolve => setTimeout(resolve, 100));
     
     await authorizeAccount(account);
   }, [accounts, authorizeAccount]);
 
+  const getAccessToken = useCallback(() => {
+    return TokenManager.getAccessToken();
+  }, []);
+
   const value = useMemo(
     () => ({
       isAuthorized,
       isLoading,
+      authError,
       accounts,
       activeAccount,
       accountInfo,
       balance,
-      authError,
       login,
+      signup,
       logout,
       switchAccount,
+      getAccessToken,
     }),
     [
       isAuthorized,
       isLoading,
+      authError,
       accounts,
       activeAccount,
       accountInfo,
       balance,
-      authError,
       login,
+      signup,
       logout,
       switchAccount,
+      getAccessToken,
     ]
   );
 
