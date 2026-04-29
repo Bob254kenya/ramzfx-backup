@@ -1,4 +1,5 @@
 // deriv-api.ts - OAuth 2.0 with PKCE Implementation
+// Complete working version for RamzFX
 
 // ============================================
 // CONFIGURATION
@@ -7,12 +8,12 @@
 // Your OAuth App credentials from Deriv Dashboard
 const DERIV_CLIENT_ID = '32ZV1tqChTs1hNdvQ7skk';  // OAuth App ID from Ramz Fx
 const DERIV_REDIRECT_URI = 'https://ramzfx.site'; // Must match exactly
-const DERIV_APP_ID = 131592; // Legacy support (kept for backward compatibility)
+const DERIV_APP_ID = 131592; // Legacy support
 
 // API Endpoints
 const DERIV_WS_URL = `wss://ws.derivws.com/websockets/v3?app_id=${DERIV_APP_ID}`;
-const DERIV_AUTH_URL = 'https://auth.deriv.com/oauth2/auth';
-const DERIV_TOKEN_URL = 'https://auth.deriv.com/oauth2/token';
+const DERIV_AUTH_URL = 'https://oauth.deriv.com/oauth2/authorize';
+const DERIV_TOKEN_URL = 'https://oauth.deriv.com/oauth2/token';
 
 // ============================================
 // TYPES
@@ -86,7 +87,7 @@ export type MessageHandler = (data: any) => void;
 // ============================================
 
 /**
- * Generate a cryptographically random code verifier (43 characters)
+ * Generate a cryptographically random code verifier (43-128 characters)
  */
 function generateCodeVerifier(): string {
   const array = new Uint8Array(32);
@@ -146,7 +147,7 @@ function clearCodeVerifier(): void {
  * Generate CSRF token for OAuth state parameter
  */
 function generateCsrfToken(): string {
-  const token = Math.random().toString(36).substring(2, 15);
+  const token = Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
   sessionStorage.setItem('oauth_csrf_token', token);
   sessionStorage.setItem('oauth_csrf_token_timestamp', Date.now().toString());
   return token;
@@ -169,7 +170,7 @@ function validateCsrfToken(token: string): boolean {
 // TOKEN MANAGEMENT
 // ============================================
 
-class TokenManager {
+export class TokenManager {
   private static readonly STORAGE_KEY = 'deriv_auth_state';
   
   static saveAuthState(state: AuthState): void {
@@ -180,24 +181,33 @@ class TokenManager {
     const data = sessionStorage.getItem(this.STORAGE_KEY);
     if (!data) return null;
     
-    const state: AuthState = JSON.parse(data);
-    
-    // Check if token is expired
-    if (state.expires_at && Date.now() >= state.expires_at) {
-      this.clearAuthState();
+    try {
+      const state: AuthState = JSON.parse(data);
+      
+      // Check if token is expired
+      if (state.expires_at && Date.now() >= state.expires_at) {
+        this.clearAuthState();
+        return null;
+      }
+      
+      return state;
+    } catch {
       return null;
     }
-    
-    return state;
   }
   
   static clearAuthState(): void {
     sessionStorage.removeItem(this.STORAGE_KEY);
     localStorage.removeItem('deriv_active_account');
+    localStorage.removeItem('deriv_accounts');
   }
   
   static getAccessToken(): string | null {
     return this.getAuthState()?.access_token || null;
+  }
+  
+  static getRefreshToken(): string | null {
+    return this.getAuthState()?.refresh_token || null;
   }
   
   static async refreshToken(): Promise<boolean> {
@@ -236,6 +246,10 @@ class TokenManager {
       console.error('Token refresh failed:', error);
       return false;
     }
+  }
+  
+  static isAuthenticated(): boolean {
+    return this.getAccessToken() !== null;
   }
 }
 
@@ -279,7 +293,7 @@ export async function exchangeCodeForToken(code: string): Promise<AuthState | nu
   const codeVerifier = getCodeVerifier();
   
   if (!codeVerifier) {
-    throw new Error('PKCE code verifier not found or expired');
+    throw new Error('PKCE code verifier not found or expired. Please try logging in again.');
   }
   
   const response = await fetch(DERIV_TOKEN_URL, {
@@ -295,11 +309,15 @@ export async function exchangeCodeForToken(code: string): Promise<AuthState | nu
   });
   
   if (!response.ok) {
-    const error = await response.text();
-    throw new Error(`Token exchange failed: ${error}`);
+    const errorText = await response.text();
+    throw new Error(`Token exchange failed: ${response.status} - ${errorText}`);
   }
   
   const data = await response.json();
+  
+  if (!data.access_token) {
+    throw new Error('No access token received');
+  }
   
   const authState: AuthState = {
     access_token: data.access_token,
@@ -316,6 +334,7 @@ export async function exchangeCodeForToken(code: string): Promise<AuthState | nu
   if (accounts && accounts.length > 0) {
     authState.active_loginid = accounts[0].loginid;
     localStorage.setItem('deriv_active_account', accounts[0].loginid);
+    localStorage.setItem('deriv_accounts', JSON.stringify(accounts));
   }
   
   TokenManager.saveAuthState(authState);
@@ -330,10 +349,12 @@ export async function exchangeCodeForToken(code: string): Promise<AuthState | nu
  * Fetch accounts using access token
  */
 async function fetchAccountsFromAPI(accessToken: string): Promise<DerivAccount[]> {
-  const ws = new WebSocket(DERIV_WS_URL);
-  
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error('Account fetch timeout')), 10000);
+    const ws = new WebSocket(DERIV_WS_URL);
+    const timeout = setTimeout(() => {
+      ws.close();
+      reject(new Error('Account fetch timeout'));
+    }, 10000);
     
     ws.onopen = () => {
       ws.send(JSON.stringify({ 
@@ -350,7 +371,7 @@ async function fetchAccountsFromAPI(accessToken: string): Promise<DerivAccount[]
         
         const accounts: DerivAccount[] = data.authorize.account_list.map((acc: any) => ({
           loginid: acc.loginid,
-          token: accessToken, // Same token for all accounts
+          token: accessToken,
           currency: acc.currency,
           is_virtual: acc.is_virtual === 1,
         }));
@@ -384,7 +405,7 @@ export async function handleOAuthRedirect(search: string): Promise<DerivAccount[
   
   if (error) {
     console.error('OAuth error:', error);
-    return null;
+    throw new Error(`OAuth error: ${error}`);
   }
   
   if (!code) {
@@ -394,7 +415,7 @@ export async function handleOAuthRedirect(search: string): Promise<DerivAccount[
   // Validate CSRF token
   if (!state || !validateCsrfToken(state)) {
     console.error('Invalid CSRF token');
-    return null;
+    throw new Error('Security validation failed. Please try again.');
   }
   
   try {
@@ -408,7 +429,7 @@ export async function handleOAuthRedirect(search: string): Promise<DerivAccount[
     
   } catch (error) {
     console.error('OAuth token exchange failed:', error);
-    return null;
+    throw error;
   }
 }
 
@@ -756,7 +777,7 @@ class DerivAPI {
   }
   
   isAuthenticated(): boolean {
-    return TokenManager.getAccessToken() !== null;
+    return TokenManager.isAuthenticated();
   }
   
   logout(): void {
@@ -767,11 +788,8 @@ class DerivAPI {
 
 export const derivApi = new DerivAPI();
 
-// Legacy exports for backward compatibility
-export { TokenManager as OAuthTokenManager };
-
 // ============================================
-// MARKETS (unchanged)
+// MARKETS
 // ============================================
 
 export const MARKETS = [
