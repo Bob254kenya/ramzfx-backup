@@ -1,3 +1,4 @@
+// src/pages/LoginPage.tsx
 import { motion } from 'framer-motion';
 import { useAuth } from '@/contexts/AuthContext';
 import { Activity, Shield, TrendingUp, Zap, Users, MessageCircle, MessageSquare, Youtube, Instagram, Music, X } from 'lucide-react';
@@ -296,7 +297,6 @@ export default function LoginPage() {
 
   return (
     <>
-      {/* Add styles to head */}
       <style>{socialNotificationStyles}</style>
       
       {/* Social Notification Popup */}
@@ -372,7 +372,7 @@ export default function LoginPage() {
               {[
                 { icon: TrendingUp, label: 'Live Analysis', desc: 'Real-time signals' },
                 { icon: Zap, label: 'Auto Trading', desc: 'Smart bots' },
-                { icon: Shield, label: 'Secure Login', desc: 'Deriv OAuth' },
+                { icon: Shield, label: 'Secure Login', desc: 'Deriv OAuth 2.0 + PKCE' },
                 { icon: Activity, label: 'Live Data', desc: 'Tick-by-tick' },
               ].map((feature, i) => (
                 <motion.div
@@ -411,12 +411,12 @@ export default function LoginPage() {
                     Connecting...
                   </span>
                 ) : (
-                  'Login with Deriv'
+                  'Login with Deriv (OAuth 2.0)'
                 )}
               </Button>
 
               <p className="text-xs text-muted-foreground text-center mt-4">
-                Securely authenticate via Deriv OAuth 2.0
+                Securely authenticate via Deriv OAuth 2.0 with PKCE
               </p>
 
               {/* Create Account Link */}
