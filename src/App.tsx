@@ -1,3 +1,5 @@
+// src/App.tsx - Complete with OAuth callback route
+
 import { motion } from "framer-motion";
 import { Activity } from "lucide-react";
 import bgHero from '@/assets/bg-hero.jpeg';
@@ -26,6 +28,29 @@ import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
 
+// OAuth Callback Handler Component
+function OAuthCallbackHandler() {
+  const { isLoading, isAuthorized } = useAuth();
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    // AuthProvider handles the token parsing
+    // Once authorized, redirect to home
+    if (!isLoading && isAuthorized) {
+      navigate('/', { replace: true });
+    }
+  }, [isLoading, isAuthorized, navigate]);
+
+  return (
+    <div className="min-h-screen flex items-center justify-center">
+      <div className="text-center">
+        <div className="w-12 h-12 border-4 border-primary/30 border-t-primary rounded-full animate-spin mx-auto mb-4" />
+        <p className="text-muted-foreground">Completing login...</p>
+      </div>
+    </div>
+  );
+}
+
 function AppRoutes() {
   const { isAuthorized, isLoading } = useAuth();
 
@@ -42,7 +67,6 @@ function AppRoutes() {
           animate={{ opacity: 1, scale: 1 }}
           transition={{ duration: 0.5 }}
         >
-          {/* Animated rings */}
           <div className="relative w-24 h-24">
             <motion.div
               className="absolute inset-0 rounded-full border-2 border-primary/20"
@@ -59,23 +83,12 @@ function AppRoutes() {
               animate={{ rotate: 360 }}
               transition={{ duration: 1.2, repeat: Infinity, ease: 'linear' }}
             />
-            <motion.div
-              className="absolute inset-3 rounded-full border-[2px] border-transparent border-b-primary/70 border-l-primary/30"
-              animate={{ rotate: -360 }}
-              transition={{ duration: 1.8, repeat: Infinity, ease: 'linear' }}
-            />
-            {/* Center icon */}
             <div className="absolute inset-0 flex items-center justify-center">
-              <motion.div
-                animate={{ scale: [1, 1.1, 1] }}
-                transition={{ duration: 1.5, repeat: Infinity }}
-              >
+              <motion.div animate={{ scale: [1, 1.1, 1] }} transition={{ duration: 1.5, repeat: Infinity }}>
                 <Activity className="w-8 h-8 text-primary" />
               </motion.div>
             </div>
           </div>
-
-          {/* Welcome text */}
           <div className="space-y-2">
             <motion.h1
               className="text-2xl font-bold text-foreground tracking-tight"
@@ -83,41 +96,10 @@ function AppRoutes() {
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 0.3, duration: 0.5 }}
             >
-              WELCOME TO {' '}
+              WELCOME TO{' '}
               <span className="text-primary">RAMZFX.SITE</span>
-              <div className="text-primary">TRADE WITH CONFIDENCE</div>
             </motion.h1>
-            <motion.div
-              className="flex items-center justify-center gap-2 text-muted-foreground text-sm"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              transition={{ delay: 0.6, duration: 0.5 }}
-            >
-              <motion.span
-                animate={{ opacity: [0.4, 1, 0.4] }}
-                transition={{ duration: 1.5, repeat: Infinity }}
-              >
-                Precision is Power. Profit is the Result.🔥💥
-              </motion.span>
-              <motion.span
-                className="flex gap-0.5"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                transition={{ delay: 0.8 }}
-              >
-                {[0, 1, 2].map(i => (
-                  <motion.span
-                    key={i}
-                    className="w-1 h-1 rounded-full bg-primary"
-                    animate={{ opacity: [0, 1, 0], y: [0, -4, 0] }}
-                    transition={{ duration: 0.8, repeat: Infinity, delay: i * 0.2 }}
-                  />
-                ))}
-              </motion.span>
-            </motion.div>
           </div>
-
-          {/* Progress bar */}
           <motion.div
             className="w-48 h-1 rounded-full bg-border overflow-hidden"
             initial={{ opacity: 0 }}
@@ -170,7 +152,11 @@ const App = () => (
       <Sonner />
       <BrowserRouter>
         <AuthProvider>
-          <AppRoutes />
+          <Routes>
+            {/* OAuth callback route - MUST be outside AppRoutes */}
+            <Route path="/oauth/callback" element={<OAuthCallbackHandler />} />
+            <Route path="/*" element={<AppRoutes />} />
+          </Routes>
         </AuthProvider>
       </BrowserRouter>
     </TooltipProvider>
