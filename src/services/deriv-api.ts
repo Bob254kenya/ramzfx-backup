@@ -1,11 +1,11 @@
-// deriv-api.ts - REAL Deriv OAuth Flow (tokens in URL, no code exchange)
+// deriv-api.ts - Complete working implementation with proper redirect handling
 
 // ============================================
 // CONFIGURATION
 // ============================================
 
 const DERIV_CLIENT_ID = '32ZV1tqChTs1hNdvQ7skk';
-const DERIV_REDIRECT_URI = 'https://ramzfx.site/oauth/callback'; // MUST match registered URI
+const DERIV_REDIRECT_URI = 'https://ramzfx.site/oauth/callback';
 const DERIV_APP_ID = 131592;
 const DERIV_WS_URL = `wss://ws.derivws.com/websockets/v3?app_id=${DERIV_APP_ID}`;
 const DERIV_AUTH_URL = 'https://oauth.deriv.com/oauth2/authorize';
@@ -37,44 +37,69 @@ export interface AuthorizeResponse {
   };
 }
 
+export interface TickHistoryResponse {
+  history: {
+    prices: number[];
+    times: number[];
+  };
+}
+
+export interface ContractResult {
+  contractId: string;
+  profit: number;
+  status: 'won' | 'lost' | 'open';
+  isExpired: boolean;
+  buyPrice: number;
+  sellPrice: number;
+}
+
 export type MessageHandler = (data: any) => void;
 
 // ============================================
-// REAL DERIV OAUTH - TOKENS IN URL
+// REAL DERIV OAUTH - TOKENS IN URL (NO CODE EXCHANGE)
 // ============================================
 
 /**
- * Generate OAuth URL - Deriv returns tokens directly, NO code exchange
+ * Generate OAuth URL - Deriv returns tokens directly in redirect URL
+ * This redirects TO Deriv, and Deriv redirects BACK to ramzfx.site
  */
 export function getOAuthUrl(prompt?: 'login' | 'registration'): string {
-  // Generate simple state for CSRF (optional but good)
+  // Generate state for CSRF protection
   const state = Math.random().toString(36).substring(2, 15);
   sessionStorage.setItem('oauth_state', state);
+  sessionStorage.setItem('oauth_state_timestamp', Date.now().toString());
   
-  let url = `${DERIV_AUTH_URL}?` +
-    `response_type=token&` +  // IMPORTANT: 'token' not 'code'
-    `client_id=${DERIV_CLIENT_ID}&` +
-    `redirect_uri=${encodeURIComponent(DERIV_REDIRECT_URI)}&` +
-    `state=${state}&` +
-    `scope=${encodeURIComponent('read write trade')}`;
+  const params = new URLSearchParams({
+    response_type: 'token',  // IMPORTANT: 'token' not 'code'
+    client_id: DERIV_CLIENT_ID,
+    redirect_uri: DERIV_REDIRECT_URI,
+    state: state,
+    scope: 'read write trade',
+  });
   
   if (prompt === 'registration') {
-    url += `&prompt=registration`;
+    params.set('prompt', 'registration');
   }
   
-  return url;
+  console.log('Redirecting to Deriv OAuth:', `${DERIV_AUTH_URL}?${params.toString()}`);
+  return `${DERIV_AUTH_URL}?${params.toString()}`;
 }
 
 /**
  * Parse tokens from Deriv redirect URL
- * Deriv redirects to: https://ramzfx.site/oauth/callback?token1=xxx&acct1=xxx&cur1=USD&token2=xxx&acct2=xxx...
+ * Deriv redirects to: https://ramzfx.site/oauth/callback#token1=xxx&acct1=xxx&cur1=USD&token2=xxx...
+ * Tokens come in URL HASH fragment, not search params
  */
-export function parseDerivRedirect(search: string): DerivAccount[] {
-  const params = new URLSearchParams(search);
-  const accounts: DerivAccount[] = [];
+export function parseDerivRedirect(urlHash: string): DerivAccount[] {
+  console.log('Parsing redirect URL hash:', urlHash);
   
-  // Deriv returns token1, token2, token3... for each account
+  // Remove leading # if present
+  const hash = urlHash.startsWith('#') ? urlHash.substring(1) : urlHash;
+  const params = new URLSearchParams(hash);
+  
+  const accounts: DerivAccount[] = [];
   let i = 1;
+  
   while (params.has(`token${i}`)) {
     const loginid = params.get(`acct${i}`);
     const token = params.get(`token${i}`);
@@ -87,26 +112,38 @@ export function parseDerivRedirect(search: string): DerivAccount[] {
         currency,
         is_virtual: loginid.startsWith('VRTC'), // VRTC = demo, VRW = real
       });
+      console.log(`Found account ${i}: ${loginid} (${currency}) - virtual: ${loginid.startsWith('VRTC')}`);
     }
     i++;
   }
   
-  // Validate state for CSRF protection
-  const state = params.get('state');
-  const savedState = sessionStorage.getItem('oauth_state');
-  if (state && savedState && state !== savedState) {
-    console.error('CSRF validation failed');
-    return [];
+  // Validate CSRF state
+  const receivedState = params.get('state');
+  const storedState = sessionStorage.getItem('oauth_state');
+  const storedTimestamp = sessionStorage.getItem('oauth_state_timestamp');
+  
+  if (receivedState && storedState) {
+    const age = Date.now() - parseInt(storedTimestamp || '0');
+    if (receivedState !== storedState) {
+      console.error('CSRF validation failed - state mismatch');
+      return [];
+    }
+    if (age > 10 * 60 * 1000) {
+      console.error('CSRF validation failed - state expired');
+      return [];
+    }
+    console.log('CSRF validation passed');
   }
   
   // Clean up
   sessionStorage.removeItem('oauth_state');
+  sessionStorage.removeItem('oauth_state_timestamp');
   
   return accounts;
 }
 
 // ============================================
-// TOKEN MANAGEMENT (Simplified)
+// TOKEN MANAGEMENT
 // ============================================
 
 export class TokenManager {
@@ -125,6 +162,7 @@ export class TokenManager {
       localStorage.setItem('deriv_active_account', activeLoginid || accounts[0].loginid);
       localStorage.setItem('deriv_accounts', JSON.stringify(accounts));
     }
+    console.log('Accounts saved:', accounts.map(a => a.loginid));
   }
   
   static getAccounts(): DerivAccount[] | null {
@@ -149,6 +187,9 @@ export class TokenManager {
       if (active) return active;
     }
     
+    // Prefer demo account, then the first one
+    const demo = accounts.find(a => a.is_virtual);
+    if (demo) return demo;
     return accounts[0];
   }
   
@@ -160,6 +201,7 @@ export class TokenManager {
     sessionStorage.removeItem(this.STORAGE_KEY);
     localStorage.removeItem('deriv_active_account');
     localStorage.removeItem('deriv_accounts');
+    console.log('Auth state cleared');
   }
   
   static isAuthenticated(): boolean {
@@ -179,6 +221,10 @@ class DerivAPI {
   private globalHandlers: MessageHandler[] = [];
   private connected = false;
   private activeCurrency = 'USD';
+  private reconnectAttempts = 0;
+  private maxReconnectAttempts = 5;
+  private reconnectDelay = 2000;
+  private reconnectTimer: NodeJS.Timeout | null = null;
 
   get isConnected() { return this.connected; }
 
@@ -186,21 +232,39 @@ class DerivAPI {
     this.activeCurrency = currency;
   }
 
-  async connect(accessToken: string): Promise<void> {
-    if (this.connected) {
-      // If already connected with same token, return
+  async connect(accessToken?: string): Promise<void> {
+    // If already connected, return
+    if (this.connected && this.ws?.readyState === WebSocket.OPEN) {
+      console.log('Already connected');
       return;
     }
     
+    // Get token if not provided
+    let token = accessToken;
+    if (!token) {
+      const storedToken = TokenManager.getActiveToken();
+      if (!storedToken) {
+        throw new Error('No access token available. Please login first.');
+      }
+      token = storedToken;
+    }
+    
+    console.log('Connecting to Deriv WebSocket...');
+    
     return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error('Connection timeout (10s)'));
+      }, 10000);
+      
       this.ws = new WebSocket(DERIV_WS_URL);
-      const timeout = setTimeout(() => reject(new Error('Connection timeout')), 10000);
       
       this.ws.onopen = () => {
-        this.send({ authorize: accessToken })
+        console.log('WebSocket opened, authorizing...');
+        this.send({ authorize: token })
           .then((response) => {
             clearTimeout(timeout);
             if (response.error) {
+              console.error('Authorization error:', response.error);
               reject(new Error(response.error.message));
               return;
             }
@@ -208,18 +272,27 @@ class DerivAPI {
               this.activeCurrency = response.authorize.currency;
             }
             this.connected = true;
+            this.reconnectAttempts = 0;
+            console.log('Connected and authorized successfully');
             resolve();
           })
           .catch(reject);
       };
       
-      this.ws.onerror = () => {
+      this.ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
         clearTimeout(timeout);
-        reject(new Error('WebSocket error'));
+        reject(new Error('WebSocket connection error'));
       };
       
-      this.ws.onclose = () => {
+      this.ws.onclose = (event) => {
+        console.log('WebSocket closed:', event.code, event.reason);
         this.connected = false;
+        
+        // Attempt reconnection if not intentional
+        if (this.reconnectAttempts < this.maxReconnectAttempts) {
+          this.scheduleReconnect();
+        }
       };
       
       this.ws.onmessage = (event) => {
@@ -229,7 +302,34 @@ class DerivAPI {
     });
   }
 
+  private scheduleReconnect() {
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    
+    this.reconnectAttempts++;
+    const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1);
+    console.log(`Scheduling reconnect attempt ${this.reconnectAttempts} in ${delay}ms`);
+    
+    this.reconnectTimer = setTimeout(async () => {
+      const token = TokenManager.getActiveToken();
+      if (token) {
+        try {
+          await this.connect(token);
+        } catch (error) {
+          console.error('Reconnect failed:', error);
+        }
+      }
+    }, delay);
+  }
+
   private handleMessage(data: any) {
+    // Handle token expiration
+    if (data.error?.code === 'InvalidToken' || data.error?.code === 'AuthorizationRequired') {
+      console.warn('Token expired or invalid');
+      TokenManager.clearAuthState();
+      this.connected = false;
+      return;
+    }
+    
     // Request responses
     if (data.req_id && this.handlers.has(data.req_id)) {
       this.handlers.get(data.req_id)!(data);
@@ -240,6 +340,11 @@ class DerivAPI {
     if (data.tick) {
       const handlers = this.subscriptionHandlers.get(data.tick.symbol) || [];
       handlers.forEach(h => h(data));
+    }
+    
+    // Balance updates
+    if (data.balance) {
+      this.globalHandlers.forEach(h => h({ type: 'balance', balance: data.balance }));
     }
     
     // Global handlers
@@ -255,6 +360,7 @@ class DerivAPI {
       
       const reqId = ++this.reqId;
       data.req_id = reqId;
+      
       this.handlers.set(reqId, resolve);
       this.ws.send(JSON.stringify(data));
       
@@ -287,6 +393,7 @@ class DerivAPI {
     
     if (existing.length === 1) {
       await this.send({ ticks: symbol, subscribe: 1 });
+      console.log(`Subscribed to ${symbol} ticks`);
     }
   }
   
@@ -297,7 +404,7 @@ class DerivAPI {
     } catch {}
   }
   
-  async getTickHistory(symbol: string, count: number = 100) {
+  async getTickHistory(symbol: string, count: number = 100): Promise<TickHistoryResponse> {
     const response = await this.send({
       ticks_history: symbol,
       count: Math.min(count, 20000),
@@ -317,7 +424,7 @@ class DerivAPI {
     amount: number;
     barrier?: string;
     currency?: string;
-  }) {
+  }): Promise<{ contractId: string; buyPrice: number }> {
     const proposalReq: any = {
       proposal: 1,
       contract_type: params.contract_type,
@@ -332,6 +439,7 @@ class DerivAPI {
       proposalReq.barrier = params.barrier;
     }
     
+    console.log('Sending proposal:', proposalReq);
     const proposal = await this.send(proposalReq);
     if (proposal.error) throw new Error(proposal.error.message);
     
@@ -347,46 +455,89 @@ class DerivAPI {
     };
   }
   
-  waitForContractResult(contractId: string): Promise<any> {
+  waitForContractResult(contractId: string): Promise<ContractResult> {
     return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('Contract result timeout')), 60000);
+      const timeout = setTimeout(() => {
+        reject(new Error('Contract result timeout (60s)'));
+      }, 60000);
       
-      const checkResult = async () => {
-        try {
-          const result = await this.send({
-            proposal_open_contract: 1,
-            contract_id: contractId,
-          });
-          
-          if (result.error) {
-            clearTimeout(timeout);
-            reject(new Error(result.error.message));
-            return;
-          }
-          
-          const contract = result.proposal_open_contract;
-          const isSettled = contract.is_expired === 1 || contract.is_sold === 1;
-          
-          if (isSettled) {
-            clearTimeout(timeout);
-            resolve({
-              contractId: String(contract.contract_id),
-              profit: contract.profit || 0,
-              status: contract.profit > 0 ? 'won' : 'lost',
-              buyPrice: contract.buy_price,
-              sellPrice: contract.sell_price,
-            });
-          } else {
-            setTimeout(checkResult, 1000);
-          }
-        } catch (err) {
+      let subscriptionId: string | null = null;
+      
+      const checkResult = (data: any) => {
+        const poc = data.proposal_open_contract;
+        if (!poc) return;
+        if (String(poc.contract_id) !== String(contractId)) return;
+        
+        const isSettled = poc.is_expired === 1 || poc.is_sold === 1 || poc.status === 'sold';
+        
+        if (isSettled) {
           clearTimeout(timeout);
-          reject(err);
+          
+          if (subscriptionId) {
+            this.send({ forget: subscriptionId }).catch(() => {});
+          }
+          
+          this.globalHandlers = this.globalHandlers.filter(h => h !== checkResult);
+          
+          const profit = poc.profit || (poc.sell_price - poc.buy_price) || 0;
+          const won = profit > 0;
+          
+          resolve({
+            contractId: String(poc.contract_id),
+            profit,
+            status: won ? 'won' : 'lost',
+            isExpired: poc.is_expired === 1,
+            buyPrice: poc.buy_price || 0,
+            sellPrice: poc.sell_price || 0,
+          });
         }
       };
       
-      checkResult();
+      this.globalHandlers.push(checkResult);
+      
+      this.send({
+        proposal_open_contract: 1,
+        contract_id: contractId,
+        subscribe: 1,
+      }).then(data => {
+        if (data.error) {
+          clearTimeout(timeout);
+          this.globalHandlers = this.globalHandlers.filter(h => h !== checkResult);
+          reject(new Error(data.error.message));
+          return;
+        }
+        if (data.subscription) {
+          subscriptionId = data.subscription.id;
+        }
+        checkResult(data);
+      }).catch(err => {
+        clearTimeout(timeout);
+        this.globalHandlers = this.globalHandlers.filter(h => h !== checkResult);
+        reject(err);
+      });
     });
+  }
+  
+  async buy(params: {
+    contract_type: string;
+    symbol: string;
+    duration: number;
+    duration_unit: string;
+    basis: string;
+    amount: number;
+    barrier?: string;
+    currency?: string;
+  }): Promise<any> {
+    const { contractId, buyPrice } = await this.buyContract(params);
+    const result = await this.waitForContractResult(contractId);
+    return {
+      buy: {
+        contract_id: contractId,
+        buy_price: buyPrice,
+        profit: result.profit,
+      },
+      contractResult: result,
+    };
   }
   
   onMessage(handler: MessageHandler) {
@@ -398,6 +549,10 @@ class DerivAPI {
   }
   
   disconnect() {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     if (this.ws) {
       this.ws.close();
       this.ws = null;
@@ -405,6 +560,8 @@ class DerivAPI {
     this.connected = false;
     this.handlers.clear();
     this.subscriptionHandlers.clear();
+    this.globalHandlers = [];
+    console.log('Disconnected from Deriv');
   }
 }
 
