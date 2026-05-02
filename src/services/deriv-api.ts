@@ -1,4 +1,4 @@
-// deriv-api.ts - Complete working implementation with proper redirect handling
+// src/services/deriv-api.ts - Complete working OAuth implementation
 
 // ============================================
 // CONFIGURATION
@@ -56,21 +56,19 @@ export interface ContractResult {
 export type MessageHandler = (data: any) => void;
 
 // ============================================
-// REAL DERIV OAUTH - TOKENS IN URL (NO CODE EXCHANGE)
+// OAUTH HELPERS
 // ============================================
 
 /**
- * Generate OAuth URL - Deriv returns tokens directly in redirect URL
- * This redirects TO Deriv, and Deriv redirects BACK to ramzfx.site
+ * Generate OAuth URL - Deriv redirects BACK to ramzfx.site/oauth/callback#token1=xxx
  */
 export function getOAuthUrl(prompt?: 'login' | 'registration'): string {
-  // Generate state for CSRF protection
-  const state = Math.random().toString(36).substring(2, 15);
+  const state = Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
   sessionStorage.setItem('oauth_state', state);
   sessionStorage.setItem('oauth_state_timestamp', Date.now().toString());
   
   const params = new URLSearchParams({
-    response_type: 'token',  // IMPORTANT: 'token' not 'code'
+    response_type: 'token',
     client_id: DERIV_CLIENT_ID,
     redirect_uri: DERIV_REDIRECT_URI,
     state: state,
@@ -81,19 +79,17 @@ export function getOAuthUrl(prompt?: 'login' | 'registration'): string {
     params.set('prompt', 'registration');
   }
   
-  console.log('Redirecting to Deriv OAuth:', `${DERIV_AUTH_URL}?${params.toString()}`);
+  console.log('OAuth URL:', `${DERIV_AUTH_URL}?${params.toString()}`);
   return `${DERIV_AUTH_URL}?${params.toString()}`;
 }
 
 /**
  * Parse tokens from Deriv redirect URL
- * Deriv redirects to: https://ramzfx.site/oauth/callback#token1=xxx&acct1=xxx&cur1=USD&token2=xxx...
- * Tokens come in URL HASH fragment, not search params
+ * Deriv redirects to: https://ramzfx.site/oauth/callback#token1=xxx&acct1=xxx&cur1=USD
  */
 export function parseDerivRedirect(urlHash: string): DerivAccount[] {
-  console.log('Parsing redirect URL hash:', urlHash);
+  console.log('Parsing redirect hash:', urlHash.substring(0, 200));
   
-  // Remove leading # if present
   const hash = urlHash.startsWith('#') ? urlHash.substring(1) : urlHash;
   const params = new URLSearchParams(hash);
   
@@ -110,9 +106,9 @@ export function parseDerivRedirect(urlHash: string): DerivAccount[] {
         loginid,
         token,
         currency,
-        is_virtual: loginid.startsWith('VRTC'), // VRTC = demo, VRW = real
+        is_virtual: loginid.startsWith('VRTC'),
       });
-      console.log(`Found account ${i}: ${loginid} (${currency}) - virtual: ${loginid.startsWith('VRTC')}`);
+      console.log(`Found account ${i}: ${loginid} (${currency})`);
     }
     i++;
   }
@@ -120,19 +116,10 @@ export function parseDerivRedirect(urlHash: string): DerivAccount[] {
   // Validate CSRF state
   const receivedState = params.get('state');
   const storedState = sessionStorage.getItem('oauth_state');
-  const storedTimestamp = sessionStorage.getItem('oauth_state_timestamp');
   
-  if (receivedState && storedState) {
-    const age = Date.now() - parseInt(storedTimestamp || '0');
-    if (receivedState !== storedState) {
-      console.error('CSRF validation failed - state mismatch');
-      return [];
-    }
-    if (age > 10 * 60 * 1000) {
-      console.error('CSRF validation failed - state expired');
-      return [];
-    }
-    console.log('CSRF validation passed');
+  if (receivedState && storedState && receivedState !== storedState) {
+    console.error('CSRF validation failed');
+    return [];
   }
   
   // Clean up
@@ -157,7 +144,6 @@ export class TokenManager {
     };
     sessionStorage.setItem(this.STORAGE_KEY, JSON.stringify(data));
     
-    // Also save for quick access
     if (accounts.length > 0) {
       localStorage.setItem('deriv_active_account', activeLoginid || accounts[0].loginid);
       localStorage.setItem('deriv_accounts', JSON.stringify(accounts));
@@ -187,7 +173,6 @@ export class TokenManager {
       if (active) return active;
     }
     
-    // Prefer demo account, then the first one
     const demo = accounts.find(a => a.is_virtual);
     if (demo) return demo;
     return accounts[0];
@@ -233,13 +218,11 @@ class DerivAPI {
   }
 
   async connect(accessToken?: string): Promise<void> {
-    // If already connected, return
     if (this.connected && this.ws?.readyState === WebSocket.OPEN) {
       console.log('Already connected');
       return;
     }
     
-    // Get token if not provided
     let token = accessToken;
     if (!token) {
       const storedToken = TokenManager.getActiveToken();
@@ -289,7 +272,6 @@ class DerivAPI {
         console.log('WebSocket closed:', event.code, event.reason);
         this.connected = false;
         
-        // Attempt reconnection if not intentional
         if (this.reconnectAttempts < this.maxReconnectAttempts) {
           this.scheduleReconnect();
         }
@@ -322,7 +304,6 @@ class DerivAPI {
   }
 
   private handleMessage(data: any) {
-    // Handle token expiration
     if (data.error?.code === 'InvalidToken' || data.error?.code === 'AuthorizationRequired') {
       console.warn('Token expired or invalid');
       TokenManager.clearAuthState();
@@ -330,24 +311,20 @@ class DerivAPI {
       return;
     }
     
-    // Request responses
     if (data.req_id && this.handlers.has(data.req_id)) {
       this.handlers.get(data.req_id)!(data);
       this.handlers.delete(data.req_id);
     }
     
-    // Tick subscriptions
     if (data.tick) {
       const handlers = this.subscriptionHandlers.get(data.tick.symbol) || [];
       handlers.forEach(h => h(data));
     }
     
-    // Balance updates
     if (data.balance) {
       this.globalHandlers.forEach(h => h({ type: 'balance', balance: data.balance }));
     }
     
-    // Global handlers
     this.globalHandlers.forEach(h => h(data));
   }
 
@@ -439,7 +416,6 @@ class DerivAPI {
       proposalReq.barrier = params.barrier;
     }
     
-    console.log('Sending proposal:', proposalReq);
     const proposal = await this.send(proposalReq);
     if (proposal.error) throw new Error(proposal.error.message);
     
