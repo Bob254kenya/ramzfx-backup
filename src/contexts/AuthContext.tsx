@@ -1,9 +1,10 @@
-// src/contexts/AuthContext.tsx (simplified, working version)
+// src/contexts/AuthContext.tsx - Complete with OAuth redirect handling
 
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { useNavigate, useLocation } from "react-router-dom";
 import { derivApi, getOAuthUrl, parseDerivRedirect, TokenManager, type DerivAccount } from "@/services/deriv-api";
 
-interface AuthState {
+interface AuthContextType {
   isAuthorized: boolean;
   isLoading: boolean;
   authError: string | null;
@@ -17,7 +18,7 @@ interface AuthState {
   refreshBalance: () => Promise<number>;
 }
 
-const AuthContext = createContext<AuthState | null>(null);
+const AuthContext = createContext<AuthContextType | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isAuthorized, setIsAuthorized] = useState(false);
@@ -27,6 +28,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [activeAccount, setActiveAccount] = useState<DerivAccount | null>(null);
   const [balance, setBalance] = useState(0);
   
+  const navigate = useNavigate();
+  const location = useLocation();
   const balanceIntervalRef = useRef<NodeJS.Timeout>();
   const oauthProcessed = useRef(false);
 
@@ -53,10 +56,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setActiveAccount(account);
       setIsAuthorized(true);
       
-      // Start balance polling
       if (balanceIntervalRef.current) clearInterval(balanceIntervalRef.current);
       balanceIntervalRef.current = setInterval(refreshBalance, 1000);
       
+      console.log('Connected to account:', account.loginid);
       return true;
     } catch (err: any) {
       console.error('Connection failed:', err);
@@ -67,33 +70,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, [refreshBalance]);
 
-  // Handle OAuth redirect
+  // Handle OAuth redirect when coming BACK to ramzfx.site
   useEffect(() => {
     const handleRedirect = async () => {
-      const search = window.location.search;
+      const isCallbackUrl = location.pathname === '/oauth/callback';
       const hash = window.location.hash;
       
-      // Check both search and hash for tokens
-      const hasTokens = search.includes('token1') || hash.includes('token1');
+      console.log('Location:', location.pathname, 'Hash exists:', !!hash);
       
-      if (hasTokens && !oauthProcessed.current) {
+      if (isCallbackUrl && hash && hash.includes('token1') && !oauthProcessed.current) {
         oauthProcessed.current = true;
-        console.log('Processing OAuth redirect...');
+        console.log('Processing OAuth redirect callback...');
         
-        // Clean up URL - remove tokens from hash if present
-        let queryToProcess = search;
-        if (hash.includes('token1')) {
-          queryToProcess = hash.substring(1); // Remove # from hash
-          window.history.replaceState({}, '', window.location.pathname);
-        } else if (search.includes('token1')) {
-          window.history.replaceState({}, '', window.location.pathname);
-        }
-        
-        const parsedAccounts = parseDerivRedirect(queryToProcess);
-        console.log('Parsed accounts:', parsedAccounts.map(a => ({ loginid: a.loginid, is_virtual: a.is_virtual })));
+        const parsedAccounts = parseDerivRedirect(hash);
         
         if (parsedAccounts.length > 0) {
-          // Filter out VRW/CRW accounts if needed (keep VRTC demo and real accounts)
           const allowedAccounts = parsedAccounts.filter(a => 
             !a.loginid.startsWith('CRW') && !a.loginid.startsWith('VRW')
           );
@@ -102,12 +93,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             TokenManager.saveAccounts(allowedAccounts);
             setAccounts(allowedAccounts);
             
-            // Try demo account first, then real
             const demoAccount = allowedAccounts.find(a => a.is_virtual);
-            const realAccount = allowedAccounts.find(a => !a.is_virtual);
-            const accountToUse = demoAccount || realAccount || allowedAccounts[0];
+            const accountToUse = demoAccount || allowedAccounts[0];
             
+            console.log('Using account:', accountToUse.loginid);
             await connectAccount(accountToUse);
+            
+            // Navigate to home after successful login
+            navigate('/', { replace: true });
           } else {
             setAuthError('No valid accounts found. Please use a different Deriv account.');
           }
@@ -120,7 +113,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
     
     handleRedirect();
-  }, [connectAccount]);
+  }, [location.pathname, navigate, connectAccount]);
 
   // Load stored session on mount
   useEffect(() => {
@@ -144,17 +137,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [connectAccount]);
 
   const login = useCallback(() => {
+    console.log('Initiating login - redirecting to Deriv');
     TokenManager.clearAuthState();
     derivApi.disconnect();
     oauthProcessed.current = false;
-    window.location.href = getOAuthUrl('login');
+    const oauthUrl = getOAuthUrl('login');
+    window.location.href = oauthUrl;
   }, []);
 
   const signup = useCallback(() => {
+    console.log('Initiating signup - redirecting to Deriv');
     TokenManager.clearAuthState();
     derivApi.disconnect();
     oauthProcessed.current = false;
-    window.location.href = getOAuthUrl('registration');
+    const oauthUrl = getOAuthUrl('registration');
+    window.location.href = oauthUrl;
   }, []);
 
   const logout = useCallback(() => {
@@ -167,7 +164,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setBalance(0);
     setAuthError(null);
     oauthProcessed.current = false;
-  }, []);
+    navigate('/');
+    console.log('Logged out');
+  }, [navigate]);
 
   const switchAccount = useCallback(async (loginid: string) => {
     const account = accounts.find(a => a.loginid === loginid);
